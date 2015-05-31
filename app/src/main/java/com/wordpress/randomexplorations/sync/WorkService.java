@@ -11,6 +11,9 @@ import android.util.Log;
 
 /**
  * Created by maniksin on 5/30/15.
+ * Class for service that invokes the background thread.
+ * General jargon, except that it uses an extended Binder
+ * to communicate background thread's message handler to the peer Manager.
  */
 public class WorkService extends Service {
 

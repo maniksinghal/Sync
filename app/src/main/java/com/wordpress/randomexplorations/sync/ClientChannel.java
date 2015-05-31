@@ -39,6 +39,9 @@ public class ClientChannel {
         }
     }
 
+    /*
+    * Local socket creation result at startup
+     */
     public void setLocalNetworkParams(SocketAddress sockaddr) {
         InetSocketAddress addr = (InetSocketAddress)sockaddr;
         String str = new String("Listening on " + addr.getAddress().toString() + "-" +

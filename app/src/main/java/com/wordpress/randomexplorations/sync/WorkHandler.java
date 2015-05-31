@@ -26,12 +26,21 @@ import java.util.logging.Logger;
 
 /**
  * Created by maniksin on 5/28/15.
+ *
+ * Common handler for foreground/background threads
+ * Note that this is common code, not common context for the handlers.
+ *
  */
 public class WorkHandler extends Handler {
-    private Handler mClient;
-    private Socket mSocket;
+    private Handler mClient;   // PeerManager's handler (worker-thread => PeerManager)
+
+    private Socket mSocket;    // Our socket
+    private InetSocketAddress localAddr;  // Our local addr to which we are bound
+
+    // Last peer to which socket was (or is) connected.
     private InetSocketAddress remoteAddr;
-    private InetSocketAddress localAddr;
+
+    // Identifier whether its foreground, or background thread
     private int mCallerContext;
 
 
@@ -40,12 +49,16 @@ public class WorkHandler extends Handler {
     private final int NETWORK_MSG_STRING_ID = 1;
     private final int NETWORK_MSG_ACK_ID = 2;
 
+    /*
+    * Object returned by the low-level network operation API
+    * containing result of the network operation.
+     */
     private class NetworkResponse {
-        public byte[] response;  // payload
-        public int msg_id;
-        public int response_len;
-        public int return_code;
-        public IOException e;
+        public byte[] response;  // payload portion of the response from the Peer
+        public int msg_id;   // msg-id of the response from the peer
+        public int response_len;  // length of the payload of Peer's response (response.length)
+        public int return_code;  // General status of the low-level operation
+        public IOException e;  // Exception raised by low-level operation (if any)
 
         private final static int NETWORK_RESPONSE_SUCCESS = 0;
         private final static int NETWORK_RESPONSE_ERR_IO_EXCEPTION = 1;
@@ -59,15 +72,26 @@ public class WorkHandler extends Handler {
         mSocket = null;
     }
 
+    /*
+    * Background (service) thread is inited with this constructor
+    * and the call to work_handler_init on init messages received
+    * from PeerManager.
+     */
     public WorkHandler(Looper looper) {
         super(looper);
     }
 
+    /*
+    * Foreground's thread is inited with this constructor.
+     */
     public WorkHandler(Looper looper, Handler client, InetAddress addr, int context) {
         super(looper);
         workhandler_init(client, addr, context);
     }
 
+    /*
+    * Common code for initialization of foreground/background threads
+     */
     public void workhandler_init(Handler client, InetAddress addr, int context) {
 
         mClient = client;
@@ -101,10 +125,20 @@ public class WorkHandler extends Handler {
         mClient.sendMessage(msg);
     }
 
+    /*
+    * Send requested message to peer and (optionally) receive
+    * Peer's response.
+     */
     private void runOp_sendMessage(Operation op) {
 
         Message msg = mClient.obtainMessage();
         NetworkResponse netResponse;
+
+        /* Message format:
+        * int Msg-id
+        * int Payload-len
+        * byte[] Payload
+         */
 
         byte[] payload = (byte[])op.mObj;
         byte[] full_message = new byte[8 + payload.length];
@@ -114,6 +148,8 @@ public class WorkHandler extends Handler {
         bb.put(payload);
 
         InetSocketAddress sockaddr = new InetSocketAddress(op.mPeer.ip_address, op.mPeer.portNumber);
+
+        // actual low-level call to send message and receive reply
         netResponse = sendMessage(full_message, sockaddr, true);
 
         msg.what = PeerManager.MSG_WORKER_OP_STATUS;
@@ -141,12 +177,17 @@ public class WorkHandler extends Handler {
         mClient.sendMessage(msg);
     }
 
+    /*
+    Low level API for actual send message to the peer and
+    receiving a reply.
+     */
     private NetworkResponse sendMessage(byte[] message, InetSocketAddress peer_addr, boolean reply_expected) {
 
         boolean reconnecting = true;
         NetworkResponse netResponse = new NetworkResponse();
 
-        // Prepare the socket
+        // Check if our socket is already connected to the same
+        // Peer. In that case, we make an attempt to reuse the socket.
         if (mSocket.isConnected() && remoteAddr != null) {
             if (remoteAddr.getAddress().equals(peer_addr.getAddress()) &&
                     remoteAddr.getPort() == peer_addr.getPort()) {
@@ -221,6 +262,9 @@ public class WorkHandler extends Handler {
         return netResponse;
     }
 
+    /*
+    * Handle the operation request form peer manager.
+     */
     private void runOp(Operation op) {
 
         Message msg = mClient.obtainMessage();
@@ -243,6 +287,11 @@ public class WorkHandler extends Handler {
 
     }
 
+    /*
+    * Cleanup call from peer manager.
+    * Currently it is received only for the foreground thread when
+    * the activity is going to stop.
+     */
     private void cleanup() {
 
         Message msg = mClient.obtainMessage();
@@ -264,6 +313,11 @@ public class WorkHandler extends Handler {
         mClient.sendMessage(msg);
     }
 
+    /*
+    * Worker threads (foreground or background) wait in a loop on their
+    * message-queues, and this handler gets invoked when a message is
+    * received from the Peer Manager.
+     */
     public void handleMessage(Message msg) {
         // Main logic here
         switch (msg.what) {

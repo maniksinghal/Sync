@@ -21,17 +21,28 @@ import java.util.List;
 
 /**
  * Created by maniksin on 5/28/15.
+ * Class to handle network operations with peers.
  */
 public class PeerManager {
     private List<Peer> mPeers;
-    private WorkHandler mWorker;
-    private ClientChannel mChannel;
     private boolean mInitDone;
+
+    private ClientChannel mChannel;  // Client provided Api callback for updating result from network operations
+
+    // Handle to foreground thread (Needed to kill it on activity stop)
     private HandlerThread mWorkerThread = null;
+
+    // Counters to track whether worker thread(s) are busy
     private int mPendingOperations = 0;
     private int mPendingServiceOperations = 0;
+
+    // Background (service) thread's handler (peer => service communication)
     private WorkHandler mServiceHandler = null;
-    private InetAddress localAddr;
+    private WorkHandler mWorker;    // Foreground thread's handler (peer => worker communication)
+
+    private InetAddress localAddr;  // IP address to which we are bound
+
+    // Handler provided to worker threads (worker => peer communication)
     private Handler mClientHandler;
 
     // Messages between worker thread and peer manager
@@ -66,6 +77,11 @@ public class PeerManager {
 
     public final static String LOGGER = "PeerManagerLogger";
 
+
+    /*
+    API for starting a background operation.
+    The request shall be sent to the thread created by the service
+     */
     public int startBackgroundOperation(Operation op) {
 
         if (mServiceHandler == null) {
@@ -91,6 +107,13 @@ public class PeerManager {
 
     }
 
+    /*
+    * API to invoke operations for the foreground thread
+    * for short operations like send-message and receive reply.
+    *
+    * Assumes, the operations are triggered by the user so that the phone
+    * does not go to sleep while they run.
+     */
     public int startOperation(Operation Op) {
 
         if (!mInitDone) {
@@ -119,20 +142,32 @@ public class PeerManager {
         return A.ip_address.equals(B.ip_address) && A.portNumber == B.portNumber;
     }
 
+    /*
+    * Activity is stopping
+    * Cleanup peer-manager context.
+     */
     public void cleanup() {
         Message msg = mWorker.obtainMessage();
         msg.what = MSG_WORKER_CLEANUP;
         mWorker.sendMessage(msg);
+
+        /*
+        * We should not be cleaning up the service thread
+        * as its job is to continue performing background operations.
 
         if (mServiceHandler != null) {
             msg = mServiceHandler.obtainMessage();
             msg.what = MSG_WORKER_CLEANUP;
             mServiceHandler.sendMessage(msg);
         }
+        */
 
 
     }
 
+    /*
+    * Add a peer to the PeerManager database.
+     */
     public int addPeer(Peer peer) {
         for (Peer p : mPeers) {
             if (is_same_peer(p, peer)) {
@@ -146,6 +181,10 @@ public class PeerManager {
     }
 
 
+    /*
+    * Callback when the service invoked by PeerManager finally gets
+    * connected/disconnected.
+     */
     private ServiceConnection mServiceConn = new ServiceConnection() {
 
         public void onServiceConnected(ComponentName name, IBinder service) {
@@ -178,7 +217,7 @@ public class PeerManager {
         mInitDone = false;
         localAddr = addr;
 
-        /* Create a new worker thread. It will start and block
+        /* Create the foreground worker thread. It will start and block
          * on its Message Queue. We later retrieve the queue-handle
          * to post messages to it.
          */
@@ -186,8 +225,8 @@ public class PeerManager {
         mWorkerThread.start();
         looper = mWorkerThread.getLooper();
 
-        // Handler to receive messages from the network managing
-        // PeerManager
+        // Handler to receive messages from the foreground/background
+        // worker threads.
         Handler client = new Handler(Looper.getMainLooper()) {
 
             @Override
@@ -204,6 +243,7 @@ public class PeerManager {
                         }
                         break;
 
+                    // Result of the operation enqueued to the worker thread.
                     case MSG_WORKER_OP_STATUS:
                         mChannel.reportOperationResult(msg.arg1, (Operation)msg.obj);
                         if (msg.arg2 == WORKER_TYPE_FOREGROUND) {
@@ -213,6 +253,7 @@ public class PeerManager {
                         }
                         break;
 
+                    // Result of the cleanup request sent to the foreground worker thread.
                     case MSG_WORKER_CLEANUP_DONE:
                         if (msg.arg2 == WORKER_TYPE_FOREGROUND) {
                             mWorkerThread.interrupt();  // Kill the thread now

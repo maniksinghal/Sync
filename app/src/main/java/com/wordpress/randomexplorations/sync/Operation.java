@@ -5,11 +5,11 @@ package com.wordpress.randomexplorations.sync;
  */
 public class Operation {
     public Peer mPeer;
-    public int mOperationType;
-    public int mOperationStatus;
-    public String mOperationStatusString;
+    public int mOperationType;  // see below
+    public int mOperationStatus;  // see below
+    public String mOperationStatusString;  // Stringified result from worker thread
     public Object mObj;
-    public Object mResponse;
+    public Object mResponse;    // Reply message from peer
 
     public final static int OPERATION_TYPE_UNKNOWN = 0;
     public final static int OPERATION_TYPE_SEND_MESSAGE = 1;
