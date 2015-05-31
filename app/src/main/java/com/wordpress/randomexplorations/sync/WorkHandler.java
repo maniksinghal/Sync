@@ -6,6 +6,7 @@ import android.os.Looper;
 import android.os.Message;
 import android.util.Log;
 
+import java.io.BufferedReader;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -22,6 +23,7 @@ import java.net.SocketAddress;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.nio.ByteBuffer;
+import java.util.List;
 import java.util.logging.Logger;
 
 /**
@@ -43,11 +45,34 @@ public class WorkHandler extends Handler {
     // Identifier whether its foreground, or background thread
     private int mCallerContext;
 
+    // Context for the ongoing file transfer
+    private FileTransferContext fileContext = null;
+
 
     // Messages exchanged with the peer
     // Keep in sync with Peer's project
     private final int NETWORK_MSG_STRING_ID = 1;
     private final int NETWORK_MSG_ACK_ID = 2;
+
+    /*
+    * Class managing context for ongoing file transfer
+     */
+    private class FileTransferContext {
+        public List<String> files;  // Remaining files
+        public String currentFile;  // Replace with file descriptor
+        public int totalBytes;
+        public int bytesTransferred;
+        public Operation op;
+
+        public FileTransferContext(Operation oper) {
+            files = (List<String>) oper.mObj;
+            currentFile = null;
+            totalBytes = 0;
+            bytesTransferred = 0;
+            op = oper;
+
+        }
+    }
 
     /*
     * Object returned by the low-level network operation API
@@ -123,6 +148,70 @@ public class WorkHandler extends Handler {
         }
 
         mClient.sendMessage(msg);
+    }
+
+    /*
+    * Function to send response back to PeerManager
+     */
+    private void sendResponseToClient(int what, int arg1, int arg2, Object obj) {
+        Message msg = mClient.obtainMessage();
+        msg.what = what;
+        msg.arg1 = arg1;
+        msg.arg2 = arg2;
+        msg.obj = obj;
+        mClient.sendMessage(msg);
+    }
+
+    private void continue_file_transfer() {
+
+        if (fileContext.currentFile == null) {
+            // Starting transfer or previous file complete
+            if (fileContext.files.isEmpty()) {
+                // Transfer complete for all files
+                sendResponseToClient(PeerManager.MSG_WORKER_OP_STATUS,
+                        PeerManager.PEER_MANAGER_ERR_SUCCESS, 0, fileContext.op);
+                fileContext = null;   // Ready for next operation request
+                return;
+            } else {
+                fileContext.currentFile = fileContext.files.remove(0);
+                // @todo: Continue coding the file transfer operation
+            }
+        }
+    }
+
+    /*
+    * Request to send file
+     */
+    private void runOp_sendFiles(Operation op) {
+
+        int err_code = PeerManager.PEER_MANAGER_ERR_SUCCESS;
+        String str = new String("Success");
+
+        if (mCallerContext == PeerManager.WORKER_TYPE_FOREGROUND) {
+            // Not allowed in foreground thread
+            err_code = PeerManager.PEER_MANAGER_ERR_INVALID_REQUEST;
+            str = new String("Not allowed in foreground thread");
+        }
+
+        if (fileContext != null) {
+            // A file transfer operation is already ongoing.
+            err_code = PeerManager.PEER_MANAGER_ERR_BUSY;
+            str = new String("Busy!!");
+        }
+
+        if (err_code != PeerManager.PEER_MANAGER_ERR_SUCCESS) {
+            Message msg = mClient.obtainMessage();
+            msg.what = PeerManager.MSG_WORKER_OP_STATUS;
+            msg.arg1 = err_code;
+            msg.obj = op;
+            op.mOperationStatusString = str;
+            mClient.sendMessage(msg);
+            return;
+        }
+
+        // All ok, begin the transfer
+        fileContext = new FileTransferContext(op);
+        continue_file_transfer();
     }
 
     /*
@@ -280,6 +369,9 @@ public class WorkHandler extends Handler {
         switch (op.mOperationType) {
             case Operation.OPERATION_TYPE_SEND_MESSAGE:
                 runOp_sendMessage(op);
+                break;
+            case Operation.OPERATION_TYPE_SEND_FILE:
+                runOp_sendFiles(op);
                 break;
             default:
                 break;

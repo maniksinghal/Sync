@@ -74,6 +74,8 @@ public class PeerManager {
     public final static int PEER_MANAGER_ERR_IO_EXCEPTION = 5;
     public final static int PEER_MANAGER_ERR_PEER_EXISTS = 6;
     public final static int PEER_MANAGER_ERR_INVALID_RESPONSE = 7;
+    public final static int PEER_MANAGER_ERR_INVALID_REQUEST = 8;
+    public final static int PEER_MANAGER_ERR_BUSY = 9;
 
     public final static String LOGGER = "PeerManagerLogger";
 
