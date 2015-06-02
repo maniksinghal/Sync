@@ -18,6 +18,8 @@ import android.widget.TextView;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.util.ArrayList;
+import java.util.List;
 
 import static android.text.format.Formatter.*;
 
@@ -93,9 +95,34 @@ public class MainActivity extends ActionBarActivity {
         String str = new String("Hello world");
 
         op.setMessageSend(str.getBytes());
-        int ret = mPeerManager.startBackgroundOperation(op);
+        int ret = mPeerManager.startOperation(op);
         Log.d(PeerManager.LOGGER, "Start operation said: " + ret);
 
+    }
+
+    /*
+    * File transfer button
+     */
+    public void onButtonClick2 (View view) {
+        Operation op = new Operation(mPeer);
+        Log.d(PeerManager.LOGGER, "Sending File to peer");
+
+        List<String> mylist = new ArrayList<>();
+        mylist.add(new String("/sdcard/DCIM/Camera/IMG_20150506_095011836.jpg"));
+        mylist.add(new String("/sdcard/DCIM/Camera/IMG_20150506_102007388_HDR.jpg"));
+        op.mOperationStatus = Operation.OPERATION_STATUS_PENDING;
+        op.mOperationType = Operation.OPERATION_TYPE_SEND_FILE;
+        op.mObj = mylist;
+        int ret = mPeerManager.startBackgroundOperation(op);
+        Log.d(PeerManager.LOGGER, "Start file send said: " + ret);
+
+    }
+
+    /*
+    * Cancel file transfer button
+     */
+    public void onButtonClick3 (View view) {
+        mPeerManager.cancelOperation();
     }
 
     public TextView getTextView() {

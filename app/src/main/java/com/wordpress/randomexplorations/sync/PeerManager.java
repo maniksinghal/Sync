@@ -50,12 +50,18 @@ public class PeerManager {
     public final static int MSG_WORKER_INIT_STATUS = 1;
     public final static int MSG_WORKER_OP_STATUS = 2;
     public final static int MSG_WORKER_CLEANUP_DONE = 3;
+    public final static int MSG_WORKER_OP_PROGRESS = 4;
+    public final static int MSG_WORKER_CANCEL_STATUS = 5;
 
     // peer-manager => worker-thread
     public final static int MSG_WORKER_RUN_OP = 1;
     public final static int MSG_WORKER_CLEANUP = 2;
     public final static int MSG_WORK_SERVICE_INIT_1 = 3;
     public final static int MSG_WORK_SERVICE_INIT_2 = 4;
+    // Special case of background thread posting messages to itself during lengthy
+    // operations to check the message-queue intermittently.
+    public final static int MSG_WORKER_CONTINUE_BACKGROUND_OP = 5;
+    public final static int MSG_WORKER_CANCEL_OPERATION = 6;  // Relevant for background op's only
 
     // Peer state
     public final static int PEER_STATE_DISCOVERED = 1;
@@ -76,6 +82,7 @@ public class PeerManager {
     public final static int PEER_MANAGER_ERR_INVALID_RESPONSE = 7;
     public final static int PEER_MANAGER_ERR_INVALID_REQUEST = 8;
     public final static int PEER_MANAGER_ERR_BUSY = 9;
+    public final static int PEER_MANAGER_ERR_FILE_ERROR = 10;  // File open error, not found etc.
 
     public final static String LOGGER = "PeerManagerLogger";
 
@@ -137,6 +144,17 @@ public class PeerManager {
         mWorker.sendMessage(msg);
         mPendingOperations++;
 
+        return PEER_MANAGER_ERR_SUCCESS;
+    }
+
+    /*
+    * API to cancel current operation.
+    * The client needs to keep track of the running background operation
+     */
+    public int cancelOperation() {
+        Message msg = mServiceHandler.obtainMessage();
+        msg.what = MSG_WORKER_CANCEL_OPERATION;
+        mServiceHandler.sendMessage(msg);
         return PEER_MANAGER_ERR_SUCCESS;
     }
 
@@ -263,6 +281,14 @@ public class PeerManager {
                         }
                         // Don't unbind service as background operations might be ongoing
                         Log.d(LOGGER, "Worker thread cleanup done received");
+                        break;
+
+                    case MSG_WORKER_OP_PROGRESS:
+                        mChannel.reportOperationProgress(msg.arg1, (Operation)msg.obj);
+                        break;
+
+                    case MSG_WORKER_CANCEL_STATUS:
+                        mChannel.reportOperationCancelSTatus(msg.arg1, (String)msg.obj);
                         break;
 
                     default:

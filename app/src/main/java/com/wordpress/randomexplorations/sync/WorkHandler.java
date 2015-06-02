@@ -9,6 +9,9 @@ import android.util.Log;
 import java.io.BufferedReader;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -48,11 +51,21 @@ public class WorkHandler extends Handler {
     // Context for the ongoing file transfer
     private FileTransferContext fileContext = null;
 
+    // Prevent re-init of background thread if activity gets destroyed and comes back again
+    private boolean mInitDone = false;
+
 
     // Messages exchanged with the peer
     // Keep in sync with Peer's project
     private final int NETWORK_MSG_STRING_ID = 1;
     private final int NETWORK_MSG_ACK_ID = 2;
+    private final int NETWORK_MSG_FILE_PUT_START = 3;
+    private final int NETWORK_MSG_FILE_PUT_START_ACK = 4;
+    private final int NETWORK_MSG_FILE_DATA = 5;
+    private final int NETWORK_MSG_FILE_DATA_ACK = 6;
+    private final int NETWORK_MSG_FILE_PUT_END = 7;
+    private final int NETWORK_MSG_FILE_PUT_END_ACK = 8;
+    private final int NETWORK_MSG_FILE_TRANSFER_CANCEL = 9;
 
     /*
     * Class managing context for ongoing file transfer
@@ -60,9 +73,10 @@ public class WorkHandler extends Handler {
     private class FileTransferContext {
         public List<String> files;  // Remaining files
         public String currentFile;  // Replace with file descriptor
-        public int totalBytes;
-        public int bytesTransferred;
+        public long totalBytes;
+        public long bytesTransferred;
         public Operation op;
+        public FileInputStream fileStream;  // Descriptor to current file
 
         public FileTransferContext(Operation oper) {
             files = (List<String>) oper.mObj;
@@ -70,6 +84,7 @@ public class WorkHandler extends Handler {
             totalBytes = 0;
             bytesTransferred = 0;
             op = oper;
+            fileStream = null;
 
         }
     }
@@ -122,6 +137,11 @@ public class WorkHandler extends Handler {
         mClient = client;
         mCallerContext = context;
 
+        if (mInitDone) {
+            return;
+        }
+
+
         // Create a DatagramSocket for Network actions.
         Message msg = mClient.obtainMessage();
         msg.what = PeerManager.MSG_WORKER_INIT_STATUS;
@@ -148,6 +168,7 @@ public class WorkHandler extends Handler {
         }
 
         mClient.sendMessage(msg);
+        mInitDone = true;
     }
 
     /*
@@ -162,7 +183,46 @@ public class WorkHandler extends Handler {
         mClient.sendMessage(msg);
     }
 
+    /*
+    * Check reply from peer and send appropriate notification to PeerManager.
+    *
+    * Background thread may not require sending each network reply to the PeerManager.
+    * In such case, background thread may call this function only in case of errors.
+     */
+    void handleNetworkResponse(NetworkResponse netResponse, Operation op) {
+        Message msg = mClient.obtainMessage();
+
+        msg.what = PeerManager.MSG_WORKER_OP_STATUS;
+        msg.obj = op;
+        msg.arg2 = mCallerContext;
+        switch(netResponse.return_code) {
+            case NetworkResponse.NETWORK_RESPONSE_SUCCESS:
+                msg.arg1 = PeerManager.PEER_MANAGER_ERR_SUCCESS;
+                op.mOperationStatusString = new String("Success");
+                op.mResponse = netResponse.response;
+                break;
+            case NetworkResponse.NETWORK_RESPONSE_ERR_IO_EXCEPTION:
+                msg.arg1 = PeerManager.PEER_MANAGER_ERR_IO_EXCEPTION;
+                op.mOperationStatusString = netResponse.e.getMessage();
+                break;
+            case NetworkResponse.NETWORK_RESPONSE_ERR_SHORT_LEN:
+                msg.arg1 = PeerManager.PEER_MANAGER_ERR_INVALID_RESPONSE;
+                op.mOperationStatusString = new String("Invalid Response");
+                break;
+            default:
+                // Should not happen
+                assert (false);
+                break;
+        }
+        mClient.sendMessage(msg);
+
+    }
+
     private void continue_file_transfer() {
+
+        NetworkResponse nResponse;
+        InetSocketAddress sockaddr = new InetSocketAddress(fileContext.op.mPeer.ip_address,
+                fileContext.op.mPeer.portNumber);
 
         if (fileContext.currentFile == null) {
             // Starting transfer or previous file complete
@@ -174,9 +234,129 @@ public class WorkHandler extends Handler {
                 return;
             } else {
                 fileContext.currentFile = fileContext.files.remove(0);
-                // @todo: Continue coding the file transfer operation
+
+                File thisFile = new File(fileContext.currentFile);
+                if (thisFile == null || !thisFile.exists() || !thisFile.isFile()) {
+                    fileContext.op.mOperationStatusString = fileContext.currentFile;
+                    sendResponseToClient(PeerManager.MSG_WORKER_OP_STATUS,
+                            PeerManager.PEER_MANAGER_ERR_FILE_ERROR, mCallerContext,
+                            fileContext.op);
+                    fileContext = null;
+                    return;
+                }
+
+                try {
+                    fileContext.fileStream = new FileInputStream(thisFile);
+                } catch (FileNotFoundException e) {
+                    fileContext.op.mOperationStatusString = e.getMessage();
+                    sendResponseToClient(PeerManager.MSG_WORKER_OP_STATUS,
+                            PeerManager.PEER_MANAGER_ERR_FILE_ERROR, mCallerContext, fileContext.op);
+                    fileContext = null;
+                    return;
+                }
+
+                int msg_len = fileContext.currentFile.length();
+                byte[] data = new byte[8 + msg_len];
+                ByteBuffer bb = ByteBuffer.wrap(data);
+                bb.putInt(NETWORK_MSG_FILE_PUT_START);
+                bb.putInt(msg_len);
+                bb.put(fileContext.currentFile.getBytes());
+                nResponse = sendMessage(data, data.length, sockaddr, true);
+                if (nResponse.return_code != NetworkResponse.NETWORK_RESPONSE_SUCCESS) {
+                    handleNetworkResponse(nResponse, fileContext.op);
+                    fileContext = null;
+                    return;
+                }
+                // @todo: Handle NACK from server??
+
             }
         }
+
+        // We have some file to send, with the fileStream open
+        /*
+        * Transfer files by sending a batch of bytes in every iteration and then poll
+        * on the worker thread's queue to check for any Status/Cancel messages from PeerManager
+        */
+        int bytes_this_operation = 0;
+        while (bytes_this_operation < 10000) {  // 10k bytes per operation
+
+            int actual_read = 0;
+            int msg_len = 0;
+
+            byte[] data = new byte[1000 + 8];  // msg_id + len + 1000byte file-data
+            ByteBuffer bb = ByteBuffer.wrap(data);
+
+            //bb.putInt(NETWORK_MSG_FILE_DATA);
+
+            try {
+                actual_read = fileContext.fileStream.read(data, 8, 1000);
+
+                if (actual_read == -1) {
+                    // Reached end of file
+                    actual_read = 0;
+                    Log.d(PeerManager.LOGGER, "Reached End of file");
+                    bb.putInt(NETWORK_MSG_FILE_PUT_END);
+                    bb.putInt(0);
+                    msg_len = 8;
+                } else {
+                    bb.putInt(NETWORK_MSG_FILE_DATA);
+                    bb.putInt(actual_read);
+                    msg_len = actual_read + 8;
+                    //Log.d(PeerManager.LOGGER, "Sending " + actual_read + " file bytes");
+                }
+
+                NetworkResponse netResponse = sendMessage(data, msg_len, sockaddr, true);
+                if (netResponse.return_code != NetworkResponse.NETWORK_RESPONSE_SUCCESS) {
+                    handleNetworkResponse(netResponse, fileContext.op);
+                    fileContext = null;
+                    return;
+                }
+
+                bytes_this_operation += actual_read;
+                fileContext.bytesTransferred += actual_read;
+
+                if (actual_read == 0) {
+                    // EOF reached last time
+                    fileContext.currentFile = null;  // mark null so next time we pick up next file in List
+                    break;
+                }
+
+            } catch (IOException e) {
+                fileContext.op.mOperationStatusString = e.getMessage();
+                sendResponseToClient(PeerManager.MSG_WORKER_OP_STATUS,
+                        PeerManager.PEER_MANAGER_ERR_FILE_ERROR, mCallerContext, fileContext.op);
+                fileContext = null;
+                return;
+            }
+        }
+
+        // We either completed a batch of bytes or completed sending a file
+        if (fileContext.currentFile == null && fileContext.files.isEmpty()) {
+            // We finished sending all the files!!
+            fileContext.op.mOperationStatusString = new String("Files send success!");
+            sendResponseToClient(PeerManager.MSG_WORKER_OP_STATUS,
+                    PeerManager.PEER_MANAGER_ERR_SUCCESS, mCallerContext, fileContext.op);
+            fileContext = null;
+            return;
+        }
+
+        /*
+        *  If activity is running, then we need to keep updating it with the progress
+        *  which it may show in a progress bar to the user.
+         */
+        // @todo: Send iterim operation progress status
+        sendResponseToClient(PeerManager.MSG_WORKER_OP_PROGRESS,
+                (int)((fileContext.bytesTransferred * 100 )/fileContext.totalBytes), mCallerContext,
+                fileContext.op);
+
+        /*
+        * Post a message to self, so that we can also cleanup our message-queue and continue
+        * sending the files
+        */
+        Message msg = this.obtainMessage();
+        msg.what = PeerManager.MSG_WORKER_CONTINUE_BACKGROUND_OP;
+        this.sendMessage(msg);
+        return;
     }
 
     /*
@@ -186,6 +366,7 @@ public class WorkHandler extends Handler {
 
         int err_code = PeerManager.PEER_MANAGER_ERR_SUCCESS;
         String str = new String("Success");
+        long total_bytes = 0;
 
         if (mCallerContext == PeerManager.WORKER_TYPE_FOREGROUND) {
             // Not allowed in foreground thread
@@ -199,18 +380,27 @@ public class WorkHandler extends Handler {
             str = new String("Busy!!");
         }
 
+        for (String cur_file : (List<String>)op.mObj) {
+            File fd = new File(cur_file);
+            if (fd == null || !fd.isFile() || !fd.exists()) {
+                err_code = PeerManager.PEER_MANAGER_ERR_FILE_ERROR;
+                str = new String("Invalid file: " + cur_file);
+                break;
+            } else {
+                total_bytes += fd.length();
+            }
+        }
+
         if (err_code != PeerManager.PEER_MANAGER_ERR_SUCCESS) {
-            Message msg = mClient.obtainMessage();
-            msg.what = PeerManager.MSG_WORKER_OP_STATUS;
-            msg.arg1 = err_code;
-            msg.obj = op;
             op.mOperationStatusString = str;
-            mClient.sendMessage(msg);
+            sendResponseToClient(PeerManager.MSG_WORKER_OP_STATUS,
+                    err_code, mCallerContext, op);
             return;
         }
 
         // All ok, begin the transfer
         fileContext = new FileTransferContext(op);
+        fileContext.totalBytes = total_bytes;
         continue_file_transfer();
     }
 
@@ -239,38 +429,41 @@ public class WorkHandler extends Handler {
         InetSocketAddress sockaddr = new InetSocketAddress(op.mPeer.ip_address, op.mPeer.portNumber);
 
         // actual low-level call to send message and receive reply
-        netResponse = sendMessage(full_message, sockaddr, true);
+        netResponse = sendMessage(full_message, full_message.length, sockaddr, true);
+        handleNetworkResponse(netResponse, op);
+    }
 
-        msg.what = PeerManager.MSG_WORKER_OP_STATUS;
-        msg.obj = op;
-        msg.arg2 = mCallerContext;
-        switch(netResponse.return_code) {
-            case NetworkResponse.NETWORK_RESPONSE_SUCCESS:
-                msg.arg1 = PeerManager.PEER_MANAGER_ERR_SUCCESS;
-                op.mOperationStatusString = new String("Success");
-                op.mResponse = netResponse.response;
-                break;
-            case NetworkResponse.NETWORK_RESPONSE_ERR_IO_EXCEPTION:
-                msg.arg1 = PeerManager.PEER_MANAGER_ERR_IO_EXCEPTION;
-                op.mOperationStatusString = netResponse.e.getMessage();
-                break;
-            case NetworkResponse.NETWORK_RESPONSE_ERR_SHORT_LEN:
-                msg.arg1 = PeerManager.PEER_MANAGER_ERR_INVALID_RESPONSE;
-                op.mOperationStatusString = new String("Invalid Response");
-                break;
-            default:
-                // Should not happen
-                assert (false);
-                break;
+    /*
+    * Request from activity to cancel ongoing background
+    * operation
+     */
+    void cancelBackgroundOperation() {
+        if (fileContext != null) {
+            // Some background operation is running
+            InetSocketAddress sockaddr = new InetSocketAddress(fileContext.op.mPeer.ip_address,
+                    fileContext.op.mPeer.portNumber);
+            byte[] data = new byte[8];
+            ByteBuffer bb = ByteBuffer.wrap(data);
+            bb.putInt(NETWORK_MSG_FILE_TRANSFER_CANCEL);
+            bb.putInt(0);
+            sendMessage(data, data.length, sockaddr, false); // no-reply expected from peer
+            fileContext = null;
+
+            String str = new String("Operation cancelled");
+            sendResponseToClient(PeerManager.MSG_WORKER_CANCEL_STATUS,
+                    PeerManager.PEER_MANAGER_ERR_SUCCESS, mCallerContext, str);
+        } else {
+            String str = new String("No operation running!!");
+            sendResponseToClient(PeerManager.MSG_WORKER_CANCEL_STATUS,
+                    PeerManager.PEER_MANAGER_ERR_INVALID_REQUEST, mCallerContext, str);
         }
-        mClient.sendMessage(msg);
     }
 
     /*
     Low level API for actual send message to the peer and
     receiving a reply.
      */
-    private NetworkResponse sendMessage(byte[] message, InetSocketAddress peer_addr, boolean reply_expected) {
+    private NetworkResponse sendMessage(byte[] message, int length, InetSocketAddress peer_addr, boolean reply_expected) {
 
         boolean reconnecting = true;
         NetworkResponse netResponse = new NetworkResponse();
@@ -281,7 +474,7 @@ public class WorkHandler extends Handler {
             if (remoteAddr.getAddress().equals(peer_addr.getAddress()) &&
                     remoteAddr.getPort() == peer_addr.getPort()) {
                 // Connected to same socket
-                Log.d(PeerManager.LOGGER, "Re-using connected socket");
+                //Log.d(PeerManager.LOGGER, "Re-using connected socket");
                 reconnecting = false;
             }
         }
@@ -306,7 +499,7 @@ public class WorkHandler extends Handler {
 
                 // Now send the message
                 OutputStream out = mSocket.getOutputStream();
-                out.write(message);
+                out.write(message, 0, length);
 
                 if (reply_expected) {
                     InputStream in = mSocket.getInputStream();
@@ -358,11 +551,9 @@ public class WorkHandler extends Handler {
 
         Message msg = mClient.obtainMessage();
         if (mSocket == null) {
-            msg.what = PeerManager.MSG_WORKER_OP_STATUS;
-            msg.arg1 = PeerManager.PEER_MANAGER_ERR_NOT_INITED;
-            msg.obj = new String("Socket not connected!!");
-            msg.arg2 = mCallerContext;
-            mClient.sendMessage(msg);
+            op.mOperationStatusString = new String("Socket not connected");
+            sendResponseToClient(PeerManager.MSG_WORKER_OP_STATUS,
+                    PeerManager.PEER_MANAGER_ERR_NOT_INITED, mCallerContext, op);
             return;
         }
 
@@ -425,6 +616,16 @@ public class WorkHandler extends Handler {
                 break;
             case PeerManager.MSG_WORK_SERVICE_INIT_2:  // service handler initialization-end
                 workhandler_init(mClient, (InetAddress)msg.obj, mCallerContext);
+                break;
+            // Interim message sent by background thread to self, for polling/cleaning-up
+            // messages in the queue.
+            case PeerManager.MSG_WORKER_CONTINUE_BACKGROUND_OP:
+                if (fileContext != null) {
+                    continue_file_transfer();
+                }
+                break;
+            case PeerManager.MSG_WORKER_CANCEL_OPERATION:
+                cancelBackgroundOperation();
                 break;
             default:
                 break;

@@ -32,11 +32,22 @@ public class ClientChannel {
 
     public void reportOperationResult(int err, Operation op) {
         if (err == PeerManager.PEER_MANAGER_ERR_SUCCESS) {
-            String str = new String((byte [])op.mResponse);
+            String str = null;
+            if (op.mResponse != null) {
+                str = new String((byte [])op.mResponse);
+            }
             mActivity.getTextView().setText("Send Message success: " + str);
         } else {
             mActivity.getTextView().setText("Send message failure: " + op.mOperationStatusString);
         }
+    }
+
+    public void reportOperationProgress(int progress, Operation op) {
+        mActivity.getTextView().setText("Transfer progress: " + progress + "%.");
+    }
+
+    public void reportOperationCancelSTatus(int status, String str) {
+        mActivity.getTextView().setText(str);
     }
 
     /*
