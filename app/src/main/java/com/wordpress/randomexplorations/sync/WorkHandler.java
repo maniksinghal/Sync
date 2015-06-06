@@ -1,15 +1,23 @@
 package com.wordpress.randomexplorations.sync;
+import android.app.Notification;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.Context;
+import android.content.Intent;
 import android.net.ConnectivityManager;
+import android.net.Network;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.Message;
+import android.support.v4.app.NotificationCompat;
 import android.util.Log;
 
 import java.io.BufferedReader;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.File;
+import java.io.FileFilter;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -26,6 +34,7 @@ import java.net.SocketAddress;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.logging.Logger;
 
@@ -48,11 +57,16 @@ public class WorkHandler extends Handler {
     // Identifier whether its foreground, or background thread
     private int mCallerContext;
 
-    // Context for the ongoing file transfer
+    // Context for the ongoing file transfer, or directories sync
     private FileTransferContext fileContext = null;
+    private DirectorySyncContext directorySyncContext = null;
 
     // Prevent re-init of background thread if activity gets destroyed and comes back again
     private boolean mInitDone = false;
+
+    // handle to the notification view started during background operations
+    public NotificationManager mNotification = null;
+    public NotificationCompat.Builder mNotifyBuilder = null;
 
 
     // Messages exchanged with the peer
@@ -66,9 +80,25 @@ public class WorkHandler extends Handler {
     private final int NETWORK_MSG_FILE_PUT_END = 7;
     private final int NETWORK_MSG_FILE_PUT_END_ACK = 8;
     private final int NETWORK_MSG_FILE_TRANSFER_CANCEL = 9;
+    private final int NETWORK_MSG_DIRECTORY_TIME_GET = 10;
+    private final int NETWORK_MSG_DIRECTORY_TIME_ACK = 11;
+    private final int NETWORK_MSG_DIRECTORY_TIME_SET = 12;
+
+
+    // Cleanup ongoing background transfer
+    // Aborted, cancelled or complete
+    private void cleanup_background_operation() {
+        fileContext = null;
+        if (mNotification != null) {
+            mNotification.cancel(0);
+            mNotification = null;
+            mNotifyBuilder = null;
+        }
+        directorySyncContext = null;
+    }
 
     /*
-    * Class managing context for ongoing file transfer
+    * Class managing context for ongoing files transfer
      */
     private class FileTransferContext {
         public List<String> files;  // Remaining files
@@ -87,6 +117,16 @@ public class WorkHandler extends Handler {
             fileStream = null;
 
         }
+    }
+
+    /*
+    * Class managing context for ongoing Directory sync
+    */
+    private class DirectorySyncContext {
+        public List<String> directories;
+        public String currentDirectory;
+        public Operation op;
+        public int total_bytes;
     }
 
     /*
@@ -230,7 +270,7 @@ public class WorkHandler extends Handler {
                 // Transfer complete for all files
                 sendResponseToClient(PeerManager.MSG_WORKER_OP_STATUS,
                         PeerManager.PEER_MANAGER_ERR_SUCCESS, 0, fileContext.op);
-                fileContext = null;   // Ready for next operation request
+                cleanup_background_operation();   // Ready for next operation request
                 return;
             } else {
                 fileContext.currentFile = fileContext.files.remove(0);
@@ -241,9 +281,18 @@ public class WorkHandler extends Handler {
                     sendResponseToClient(PeerManager.MSG_WORKER_OP_STATUS,
                             PeerManager.PEER_MANAGER_ERR_FILE_ERROR, mCallerContext,
                             fileContext.op);
-                    fileContext = null;
+                    cleanup_background_operation();
                     return;
                 }
+
+                /*
+                * @todo: check how to update notifications
+
+                mNotifyBuilder.setContentText("Sending " + fileContext.currentFile);
+                Notification nt = mNotifyBuilder.build();
+                nt.flags = Notification.FLAG_ONGOING_EVENT;
+                mNotification.notify(0, nt);
+                */
 
                 try {
                     fileContext.fileStream = new FileInputStream(thisFile);
@@ -251,7 +300,7 @@ public class WorkHandler extends Handler {
                     fileContext.op.mOperationStatusString = e.getMessage();
                     sendResponseToClient(PeerManager.MSG_WORKER_OP_STATUS,
                             PeerManager.PEER_MANAGER_ERR_FILE_ERROR, mCallerContext, fileContext.op);
-                    fileContext = null;
+                    cleanup_background_operation();
                     return;
                 }
 
@@ -264,7 +313,7 @@ public class WorkHandler extends Handler {
                 nResponse = sendMessage(data, data.length, sockaddr, true);
                 if (nResponse.return_code != NetworkResponse.NETWORK_RESPONSE_SUCCESS) {
                     handleNetworkResponse(nResponse, fileContext.op);
-                    fileContext = null;
+                    cleanup_background_operation();
                     return;
                 }
                 // @todo: Handle NACK from server??
@@ -308,7 +357,7 @@ public class WorkHandler extends Handler {
                 NetworkResponse netResponse = sendMessage(data, msg_len, sockaddr, true);
                 if (netResponse.return_code != NetworkResponse.NETWORK_RESPONSE_SUCCESS) {
                     handleNetworkResponse(netResponse, fileContext.op);
-                    fileContext = null;
+                    cleanup_background_operation();
                     return;
                 }
 
@@ -325,19 +374,39 @@ public class WorkHandler extends Handler {
                 fileContext.op.mOperationStatusString = e.getMessage();
                 sendResponseToClient(PeerManager.MSG_WORKER_OP_STATUS,
                         PeerManager.PEER_MANAGER_ERR_FILE_ERROR, mCallerContext, fileContext.op);
-                fileContext = null;
+                cleanup_background_operation();
                 return;
             }
         }
 
         // We either completed a batch of bytes or completed sending a file
+
+
         if (fileContext.currentFile == null && fileContext.files.isEmpty()) {
+
             // We finished sending all the files!!
-            fileContext.op.mOperationStatusString = new String("Files send success!");
-            sendResponseToClient(PeerManager.MSG_WORKER_OP_STATUS,
-                    PeerManager.PEER_MANAGER_ERR_SUCCESS, mCallerContext, fileContext.op);
-            fileContext = null;
-            return;
+            if (directorySyncContext != null) {
+                // We are actually running a directory sync, so now we need to sync
+                // the next directory with the peer.
+
+                // First set current directory as sync'd with the Peer.
+                nResponse = setDirectorySyncStatus();
+                if (nResponse.return_code != NetworkResponse.NETWORK_RESPONSE_SUCCESS) {
+                    handleNetworkResponse(nResponse, fileContext.op);
+                    cleanup_background_operation();
+                    return;
+                }
+
+                continue_directory_sync();
+
+            } else {
+
+                fileContext.op.mOperationStatusString = new String("Files send success!");
+                sendResponseToClient(PeerManager.MSG_WORKER_OP_STATUS,
+                        PeerManager.PEER_MANAGER_ERR_SUCCESS, mCallerContext, fileContext.op);
+                cleanup_background_operation();
+                return;
+            }
         }
 
         /*
@@ -345,9 +414,9 @@ public class WorkHandler extends Handler {
         *  which it may show in a progress bar to the user.
          */
         // @todo: Send iterim operation progress status
-        sendResponseToClient(PeerManager.MSG_WORKER_OP_PROGRESS,
-                (int)((fileContext.bytesTransferred * 100 )/fileContext.totalBytes), mCallerContext,
-                fileContext.op);
+        //sendResponseToClient(PeerManager.MSG_WORKER_OP_PROGRESS,
+          //      (int)((fileContext.bytesTransferred * 100 )/fileContext.totalBytes), mCallerContext,
+            //    fileContext.op);
 
         /*
         * Post a message to self, so that we can also cleanup our message-queue and continue
@@ -358,6 +427,231 @@ public class WorkHandler extends Handler {
         this.sendMessage(msg);
         return;
     }
+
+
+    /*
+    * Start an android notification view to denote a running
+    * background operation
+    */
+    private void startNotification(Operation op) {
+      mNotifyBuilder = new
+                NotificationCompat.Builder(op.mThisActivity);
+        mNotifyBuilder.setSmallIcon(R.mipmap.sync);
+        mNotifyBuilder.setContentTitle("Copying files");
+        mNotifyBuilder.setContentText("Yes, its true, copying files");
+
+        Intent intent = new Intent(op.mThisActivity, MainActivity.class);
+
+        // Do not start another instance of the activity when the notification is clicked.
+        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        PendingIntent p = PendingIntent.getActivity(op.mThisActivity, 0, intent,
+                PendingIntent.FLAG_UPDATE_CURRENT);
+        mNotifyBuilder.setContentIntent(p);
+
+        mNotification =
+                (NotificationManager)op.mThisActivity.getSystemService(Context.NOTIFICATION_SERVICE);
+        Notification nt = mNotifyBuilder.build();
+        nt.flags = Notification.FLAG_ONGOING_EVENT;
+        mNotification.notify(0, nt);
+    }
+
+
+    NetworkResponse getDirectoryPeerStatus(String directory) {
+        InetSocketAddress sockaddr = new InetSocketAddress(fileContext.op.mPeer.ip_address,
+                fileContext.op.mPeer.portNumber);
+        /*
+        * Directory sync status get message
+        * 4 byte msg-id
+        * 4 byte payload-length
+        * 4 byte directory-len
+        * <directory-len>
+        */
+        int total_len = 12 + directory.length();
+        byte[] data = new byte[total_len];
+        ByteBuffer bb = ByteBuffer.wrap(data);
+        bb.putInt(NETWORK_MSG_DIRECTORY_TIME_GET);
+        bb.putInt(total_len - 8);
+        bb.putInt(directory.length());
+        bb.put(directory.getBytes());
+        return sendMessage(data, total_len, sockaddr, true);
+
+    }
+
+    /*
+    * Scan directory and update directorySyncContext
+    */
+    void scan_directory(File directory) {
+
+       directorySyncContext.directories.add(directory.getAbsolutePath());
+        Log.d(PeerManager.LOGGER, "Adding directory: " + directory.getAbsolutePath());
+
+        File[] files = directory.listFiles();
+        int total_files = files.length;
+        for (int i = 0; i < total_files; i++) {
+            if (files[i].isDirectory()) {
+                scan_directory(files[i]);
+            }
+        }
+
+        return;
+    }
+
+    /*
+    * Scan Directories recursively to accumulate all children directories
+    */
+    private void scanDirectories(Operation op) {
+
+        int i = 0;
+        int err_code = 0;
+        List<String> directories = (List<String>)op.mObj;
+        for (i = 0; i < directories.size(); i++) {
+            File dir = new File(directories.get(i));
+            scan_directory(dir);
+        }
+    }
+
+    private NetworkResponse setDirectorySyncStatus() {
+        ByteBuffer bb;
+        InetSocketAddress sockaddr = new InetSocketAddress(fileContext.op.mPeer.ip_address,
+                fileContext.op.mPeer.portNumber);
+        File cur_dir = new File(directorySyncContext.currentDirectory);
+           /*
+                * Directory sync message:
+                * 4 byte msg-id
+                * 4 byte payload-len
+                * 4 byte directory-string length
+                * <directory-string>
+                * 8 byte modified time
+                 */
+        int total_length = 20 + directorySyncContext.currentDirectory.length();
+        byte[] data = new byte[total_length];
+        bb = ByteBuffer.wrap(data);
+        bb.putInt(NETWORK_MSG_DIRECTORY_TIME_SET);
+        bb.putInt(total_length - 8);
+        bb.putInt(directorySyncContext.currentDirectory.length());
+        bb.put(directorySyncContext.currentDirectory.getBytes());
+        bb.putLong(cur_dir.lastModified());
+        return sendMessage(data, total_length, sockaddr, true);
+    }
+
+    private void continue_directory_sync() {
+
+        NetworkResponse nResponse;
+        List<String> files_list = null;
+
+        directorySyncContext.currentDirectory = null;
+        while (!directorySyncContext.directories.isEmpty()) {
+
+            // Pick and start with next directory
+            directorySyncContext.currentDirectory = directorySyncContext.directories.remove(0);
+            nResponse = getDirectoryPeerStatus(directorySyncContext.currentDirectory);
+            if (nResponse.return_code != PeerManager.PEER_MANAGER_ERR_SUCCESS) {
+                handleNetworkResponse(nResponse, directorySyncContext.op);
+                cleanup_background_operation();
+                return;
+            }
+
+            /*
+            * Directory sync status response message format
+            * 4-byte message-id  <stripped>
+            * 4-byte payload-length  <stripped>
+            * 8-byte mod_time
+             */
+            ByteBuffer bb = ByteBuffer.wrap(nResponse.response);
+            long mod_time = bb.getLong(0);
+            File cur_dir = new File(directorySyncContext.currentDirectory);
+
+            if (cur_dir.lastModified() == mod_time) {
+                // No change in this directory since last sync.. Nothing to do
+                Log.d(PeerManager.LOGGER, "No change in " + directorySyncContext.currentDirectory);
+                continue;
+            }
+
+            // Sync needed in this directory
+            // Select only those files which have bigger modification time
+            File cur_files[] = cur_dir.listFiles();
+            files_list = new ArrayList<>();
+            int total_files = cur_files.length;
+            for (int i = 0; i < total_files; i++) {
+                if (cur_files[i].isFile() && cur_files[i].lastModified() > mod_time) {
+                    // This file requires sync to peer
+                    files_list.add(cur_files[i].getAbsolutePath());
+                    Log.d(PeerManager.LOGGER, "Need to send: "
+                      + cur_files[i].getAbsolutePath());
+                }
+            }
+
+            if (files_list.isEmpty()) {
+                // Could be a case that a file got added and then deleted
+                // This caused directory mod-time to increase, but we didn't end
+                // up in having any actual file to sync
+                nResponse = setDirectorySyncStatus();
+                if (nResponse.return_code != PeerManager.PEER_MANAGER_ERR_SUCCESS) {
+                    handleNetworkResponse(nResponse, directorySyncContext.op);
+                    cleanup_background_operation();
+                    return;
+                }
+                continue;
+            } else {
+                break;
+            }
+
+
+        }
+
+        if (directorySyncContext.currentDirectory == null) {
+            // Directories Sync complete
+            sendResponseToClient(PeerManager.MSG_WORKER_OP_STATUS,
+                    PeerManager.PEER_MANAGER_ERR_SUCCESS, mCallerContext, directorySyncContext.op);
+            cleanup_background_operation();
+        } else {
+            fileContext.files = files_list;
+            fileContext.op = directorySyncContext.op;
+            fileContext.currentFile = null;
+
+            continue_file_transfer();
+        }
+    }
+
+    /*
+    * Request to sync directories
+     */
+    private void runOp_syncDirectories(Operation op) {
+        int err_code = PeerManager.PEER_MANAGER_ERR_SUCCESS;
+        String str = new String("Success");
+
+        if (mCallerContext == PeerManager.WORKER_TYPE_FOREGROUND) {
+            // Not allowed in foreground thread
+            err_code = PeerManager.PEER_MANAGER_ERR_INVALID_REQUEST;
+            str = new String("Not allowed in foreground thread");
+        }
+
+        if (fileContext != null) {
+            // A file transfer operation is already ongoing.
+            err_code = PeerManager.PEER_MANAGER_ERR_BUSY;
+            str = new String("Busy!!");
+        }
+
+        if (err_code != PeerManager.PEER_MANAGER_ERR_SUCCESS) {
+            op.mOperationStatusString = str;
+            sendResponseToClient(PeerManager.MSG_WORKER_OP_STATUS,
+                    err_code, mCallerContext, op);
+            return;
+        }
+
+        directorySyncContext = new DirectorySyncContext();
+        directorySyncContext.directories = new ArrayList<>();
+        directorySyncContext.op = op;
+        scanDirectories(op);
+
+        /*
+        * All OK, now we can start
+        */
+        startNotification(op);
+        fileContext = new FileTransferContext(op);
+        continue_directory_sync();
+    }
+
 
     /*
     * Request to send file
@@ -399,6 +693,7 @@ public class WorkHandler extends Handler {
         }
 
         // All ok, begin the transfer
+        startNotification(op);
         fileContext = new FileTransferContext(op);
         fileContext.totalBytes = total_bytes;
         continue_file_transfer();
@@ -447,7 +742,7 @@ public class WorkHandler extends Handler {
             bb.putInt(NETWORK_MSG_FILE_TRANSFER_CANCEL);
             bb.putInt(0);
             sendMessage(data, data.length, sockaddr, false); // no-reply expected from peer
-            fileContext = null;
+            cleanup_background_operation();
 
             String str = new String("Operation cancelled");
             sendResponseToClient(PeerManager.MSG_WORKER_CANCEL_STATUS,
@@ -563,6 +858,9 @@ public class WorkHandler extends Handler {
                 break;
             case Operation.OPERATION_TYPE_SEND_FILE:
                 runOp_sendFiles(op);
+                break;
+            case Operation.OPERATION_TYPE_SYNC_DIRECTORIES:
+                runOp_syncDirectories(op);
                 break;
             default:
                 break;

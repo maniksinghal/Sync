@@ -1,8 +1,11 @@
 package com.wordpress.randomexplorations.sync;
 
+import android.app.Activity;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.net.ConnectivityManager;
 import android.net.wifi.WifiManager;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
@@ -15,6 +18,7 @@ import android.view.MenuItem;
 import android.view.View;
 import android.widget.TextView;
 
+import java.io.File;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
@@ -26,7 +30,7 @@ import static android.text.format.Formatter.*;
 /*
 * Main UI Activity of the application
  */
-public class MainActivity extends ActionBarActivity {
+public class MainActivity extends Activity {
 
     private PeerManager mPeerManager;
     private TextView mTv;
@@ -34,6 +38,9 @@ public class MainActivity extends ActionBarActivity {
 
     // for test-only
     private Peer mPeer;
+
+    private final static String ONGOING_SYNC_STATUS = "ongoing_sync_status";
+    private final static String LAST_SYNC_STATUS = "last_sync_status";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -87,25 +94,50 @@ public class MainActivity extends ActionBarActivity {
 
         mPeerManager.addPeer(mPeer);
 
+        mTv.setText(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM).toString());
+
+    }
+
+    private void scanDirectory(List<String> file_list, File directory, SharedPreferences lastSync,
+                               SharedPreferences curSync) {
+
+        if (lastSync.getLong(directory.getAbsolutePath(), 0) == directory.lastModified()) {
+            // Directory not modified since last sync, nothing to do further
+            return;
+        }
+
+        File[] files = directory.listFiles();
+        int total = files.length;
+        for (int i = 0; i < total; i++) {
+            if (files[i].isFile()) {
+                file_list.add(files[i].getAbsolutePath());
+                Log.d(PeerManager.LOGGER, "Added file " + files[i].getAbsolutePath());
+            } else if (files[i].isDirectory()) {
+                scanDirectory(file_list, files[i], lastSync, curSync);
+            }
+        }
+
     }
 
     public void onButtonClick (View view) {
-        Operation op = new Operation(mPeer);
-        Log.d(PeerManager.LOGGER, "Sending Hello world message to peer");
-        String str = new String("Hello world");
 
-        op.setMessageSend(str.getBytes());
-        int ret = mPeerManager.startOperation(op);
-        Log.d(PeerManager.LOGGER, "Start operation said: " + ret);
+        List<String> dirs = new ArrayList<>();
+        dirs.add(Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_DCIM).toString());
 
+        Operation op = new Operation(mPeer, this);
+        op.mOperationType = Operation.OPERATION_TYPE_SYNC_DIRECTORIES;
+        op.mObj = dirs;
+        mPeerManager.startBackgroundOperation(op);
     }
 
     /*
     * File transfer button
      */
     public void onButtonClick2 (View view) {
-        Operation op = new Operation(mPeer);
+        Operation op = new Operation(mPeer, this);
         Log.d(PeerManager.LOGGER, "Sending File to peer");
+
 
         List<String> mylist = new ArrayList<>();
         mylist.add(new String("/sdcard/DCIM/Camera/IMG_20150506_095011836.jpg"));
@@ -120,6 +152,7 @@ public class MainActivity extends ActionBarActivity {
 
     /*
     * Cancel file transfer button
+    * Applies only to the running background operation
      */
     public void onButtonClick3 (View view) {
         mPeerManager.cancelOperation();
