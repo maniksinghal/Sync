@@ -83,6 +83,7 @@ public class WorkHandler extends Handler {
     private final int NETWORK_MSG_DIRECTORY_TIME_GET = 10;
     private final int NETWORK_MSG_DIRECTORY_TIME_ACK = 11;
     private final int NETWORK_MSG_DIRECTORY_TIME_SET = 12;
+    private final int NETWORK_MSG_FILE_PUT_START_NACK = 13;
 
 
     // Cleanup ongoing background transfer
@@ -266,13 +267,7 @@ public class WorkHandler extends Handler {
 
         if (fileContext.currentFile == null) {
             // Starting transfer or previous file complete
-            if (fileContext.files.isEmpty()) {
-                // Transfer complete for all files
-                sendResponseToClient(PeerManager.MSG_WORKER_OP_STATUS,
-                        PeerManager.PEER_MANAGER_ERR_SUCCESS, 0, fileContext.op);
-                cleanup_background_operation();   // Ready for next operation request
-                return;
-            } else {
+            while (!fileContext.files.isEmpty() && fileContext.currentFile == null) {
                 fileContext.currentFile = fileContext.files.remove(0);
 
                 File thisFile = new File(fileContext.currentFile);
@@ -304,84 +299,107 @@ public class WorkHandler extends Handler {
                     return;
                 }
 
-                int msg_len = fileContext.currentFile.length();
+                /*
+                * NETWORK_MSG_FILE_PUT_START
+                * 4 byte msg-id
+                * 4 byte payload
+                * 8 byte file last modified time
+                * <file-name>
+                 */
+                int msg_len = fileContext.currentFile.length() + 8;
                 byte[] data = new byte[8 + msg_len];
                 ByteBuffer bb = ByteBuffer.wrap(data);
                 bb.putInt(NETWORK_MSG_FILE_PUT_START);
                 bb.putInt(msg_len);
+                bb.putLong(thisFile.lastModified());
                 bb.put(fileContext.currentFile.getBytes());
+
                 nResponse = sendMessage(data, data.length, sockaddr, true);
                 if (nResponse.return_code != NetworkResponse.NETWORK_RESPONSE_SUCCESS) {
                     handleNetworkResponse(nResponse, fileContext.op);
                     cleanup_background_operation();
                     return;
                 }
-                // @todo: Handle NACK from server??
+
+                // Check if peer responded that file already exists and needs to be skipped.
+                if (nResponse.msg_id == NETWORK_MSG_FILE_PUT_START_NACK) {
+                    // Peer does not want to download this file, may be it already exists
+                    // Check next file
+                    fileContext.currentFile = null;
+                }
 
             }
-        }
 
-        // We have some file to send, with the fileStream open
-        /*
-        * Transfer files by sending a batch of bytes in every iteration and then poll
-        * on the worker thread's queue to check for any Status/Cancel messages from PeerManager
-        */
-        int bytes_this_operation = 0;
-        while (bytes_this_operation < 10000) {  // 10k bytes per operation
-
-            int actual_read = 0;
-            int msg_len = 0;
-
-            byte[] data = new byte[1000 + 8];  // msg_id + len + 1000byte file-data
-            ByteBuffer bb = ByteBuffer.wrap(data);
-
-            //bb.putInt(NETWORK_MSG_FILE_DATA);
-
-            try {
-                actual_read = fileContext.fileStream.read(data, 8, 1000);
-
-                if (actual_read == -1) {
-                    // Reached end of file
-                    actual_read = 0;
-                    Log.d(PeerManager.LOGGER, "Reached End of file");
-                    bb.putInt(NETWORK_MSG_FILE_PUT_END);
-                    bb.putInt(0);
-                    msg_len = 8;
-                } else {
-                    bb.putInt(NETWORK_MSG_FILE_DATA);
-                    bb.putInt(actual_read);
-                    msg_len = actual_read + 8;
-                    //Log.d(PeerManager.LOGGER, "Sending " + actual_read + " file bytes");
-                }
-
-                NetworkResponse netResponse = sendMessage(data, msg_len, sockaddr, true);
-                if (netResponse.return_code != NetworkResponse.NETWORK_RESPONSE_SUCCESS) {
-                    handleNetworkResponse(netResponse, fileContext.op);
-                    cleanup_background_operation();
-                    return;
-                }
-
-                bytes_this_operation += actual_read;
-                fileContext.bytesTransferred += actual_read;
-
-                if (actual_read == 0) {
-                    // EOF reached last time
-                    fileContext.currentFile = null;  // mark null so next time we pick up next file in List
-                    break;
-                }
-
-            } catch (IOException e) {
-                fileContext.op.mOperationStatusString = e.getMessage();
+            if (fileContext.files.isEmpty() && fileContext.currentFile == null) {
+                // Transfer complete for all files
                 sendResponseToClient(PeerManager.MSG_WORKER_OP_STATUS,
-                        PeerManager.PEER_MANAGER_ERR_FILE_ERROR, mCallerContext, fileContext.op);
-                cleanup_background_operation();
+                        PeerManager.PEER_MANAGER_ERR_SUCCESS, 0, fileContext.op);
+                cleanup_background_operation();   // Ready for next operation request
                 return;
             }
         }
 
+        if (fileContext.currentFile != null) {
+            // We have some file to send, with the fileStream open
+        /*
+        * Transfer files by sending a batch of bytes in every iteration and then poll
+        * on the worker thread's queue to check for any Status/Cancel messages from PeerManager
+        */
+            int bytes_this_operation = 0;
+            while (bytes_this_operation < 10000) {  // 10k bytes per operation
+
+                int actual_read = 0;
+                int msg_len = 0;
+
+                byte[] data = new byte[1000 + 8];  // msg_id + len + 1000byte file-data
+                ByteBuffer bb = ByteBuffer.wrap(data);
+
+                //bb.putInt(NETWORK_MSG_FILE_DATA);
+
+                try {
+                    actual_read = fileContext.fileStream.read(data, 8, 1000);
+
+                    if (actual_read == -1) {
+                        // Reached end of file
+                        actual_read = 0;
+                        Log.d(PeerManager.LOGGER, "Reached End of file");
+                        bb.putInt(NETWORK_MSG_FILE_PUT_END);
+                        bb.putInt(0);
+                        msg_len = 8;
+                    } else {
+                        bb.putInt(NETWORK_MSG_FILE_DATA);
+                        bb.putInt(actual_read);
+                        msg_len = actual_read + 8;
+                        //Log.d(PeerManager.LOGGER, "Sending " + actual_read + " file bytes");
+                    }
+
+                    NetworkResponse netResponse = sendMessage(data, msg_len, sockaddr, true);
+                    if (netResponse.return_code != NetworkResponse.NETWORK_RESPONSE_SUCCESS) {
+                        handleNetworkResponse(netResponse, fileContext.op);
+                        cleanup_background_operation();
+                        return;
+                    }
+
+                    bytes_this_operation += actual_read;
+                    fileContext.bytesTransferred += actual_read;
+
+                    if (actual_read == 0) {
+                        // EOF reached last time
+                        fileContext.currentFile = null;  // mark null so next time we pick up next file in List
+                        break;
+                    }
+
+                } catch (IOException e) {
+                    fileContext.op.mOperationStatusString = e.getMessage();
+                    sendResponseToClient(PeerManager.MSG_WORKER_OP_STATUS,
+                            PeerManager.PEER_MANAGER_ERR_FILE_ERROR, mCallerContext, fileContext.op);
+                    cleanup_background_operation();
+                    return;
+                }
+            }
+        }
+
         // We either completed a batch of bytes or completed sending a file
-
-
         if (fileContext.currentFile == null && fileContext.files.isEmpty()) {
 
             // We finished sending all the files!!
