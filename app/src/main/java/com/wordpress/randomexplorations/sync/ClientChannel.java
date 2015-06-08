@@ -7,7 +7,7 @@ import java.net.SocketAddress;
  * Created by maniksin on 5/28/15.
  * This class defines the channel used by PeerManager
  * to send notifications to the client.
- *
+ * <p/>
  * In this case, the PeerManager is running inside
  * the MainUI thread, so this channel is just a wrapper
  * to access the main Activity for updating the UI
@@ -34,7 +34,7 @@ public class ClientChannel {
         if (err == PeerManager.PEER_MANAGER_ERR_SUCCESS) {
             String str = null;
             if (op.mResponse != null) {
-                str = new String((byte [])op.mResponse);
+                str = new String((byte[]) op.mResponse);
             }
             mActivity.getTextView().setText("Send Message success: " + str);
         } else {
@@ -54,10 +54,11 @@ public class ClientChannel {
     * Local socket creation result at startup
      */
     public void setLocalNetworkParams(SocketAddress sockaddr) {
-        InetSocketAddress addr = (InetSocketAddress)sockaddr;
+        InetSocketAddress addr = (InetSocketAddress) sockaddr;
         String str = new String("Listening on " + addr.getAddress().toString() + "-" +
                 Integer.toString(addr.getPort()));
         mActivity.getTextView().setText(str);
-        mActivity.startNetworking();
+        mActivity.startNetworking(addr.getPort());
+
     }
 }

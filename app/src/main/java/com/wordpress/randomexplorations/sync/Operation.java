@@ -19,6 +19,7 @@ public class Operation {
     public final static int OPERATION_TYPE_SEND_FILE = 2;
     public final static int OPERATION_TYPE_RECEIVE_FILE = 3;
     public final static int OPERATION_TYPE_SYNC_DIRECTORIES = 4;
+    public final static int OPERATION_TYPE_FETCH_SYNC_STATUS = 5;
 
     public final static int OPERATION_STATUS_UNKNOWN = 0;
     public final static int OPERATION_STATUS_PENDING = 1;

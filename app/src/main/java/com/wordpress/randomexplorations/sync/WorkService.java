@@ -24,7 +24,7 @@ public class WorkService extends Service {
         t.start();
         Looper looper = t.getLooper();
         workHandler = new WorkHandler(looper);
-        ServiceBinder sb  = new ServiceBinder(workHandler);
+        ServiceBinder sb = new ServiceBinder(workHandler);
         return sb;
     }
 }

@@ -5,6 +5,7 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.net.ConnectivityManager;
 import android.net.wifi.WifiManager;
+import android.os.AsyncTask;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
@@ -35,46 +36,71 @@ public class MainActivity extends Activity {
     private PeerManager mPeerManager;
     private TextView mTv;
     private ClientChannel mChannel;
+    private NetworkServiceFinder mServiceFinder = null;
+    private NetworkServiceHandler mNetworkServiceHandler;
+    private InetAddress mMyAddr;
 
     // for test-only
     private Peer mPeer;
 
-    private final static String ONGOING_SYNC_STATUS = "ongoing_sync_status";
-    private final static String LAST_SYNC_STATUS = "last_sync_status";
+    private final String PEER_SERVICE_TYPE = "_share._tcp.";
+    private final String PEER_SERVICE_NAME = "myShare";
+
+    // Message from NetworkServiceFinder thread when Peer is discovered
+    public static final int NETWORK_SERVICE_MSG_DISCOVERED = 1;
+
+    private class NetworkServiceHandler extends Handler {
+        @Override
+        public void handleMessage(Message msg) {
+            if (msg.what == NETWORK_SERVICE_MSG_DISCOVERED) {
+                InetAddress ip = (InetAddress)msg.obj;
+                int port = msg.arg1;
+                mPeer = new Peer(ip, port, PEER_SERVICE_NAME);
+                mPeerManager.addPeer(mPeer);
+                mTv.setText("Got Peer at port: " + port);
+                Log.d(PeerManager.LOGGER, "Got peer at port: " + port);
+            }
+        }
+
+        public NetworkServiceHandler(Looper looper) {
+            super(looper);
+        }
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+        mNetworkServiceHandler = new NetworkServiceHandler(Looper.getMainLooper());
     }
 
     @Override
     protected void onStart() {
-        InetAddress addr;
 
         super.onStart();
 
-        mTv = (TextView)findViewById(R.id.myID);
+        mTv = (TextView) findViewById(R.id.myID);
         mChannel = new ClientChannel(this);
 
         // Check Wifi state
-        ConnectivityManager cManager = (ConnectivityManager)getSystemService(Context.CONNECTIVITY_SERVICE);
+        ConnectivityManager cManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
         if (!cManager.getNetworkInfo(ConnectivityManager.TYPE_WIFI).isConnected()) {
             mTv.setText("Wifi not connected");
             return;
         } else {
-            WifiManager wifiMgr = (WifiManager)getSystemService(WIFI_SERVICE);
+            WifiManager wifiMgr = (WifiManager) getSystemService(WIFI_SERVICE);
             String ip = formatIpAddress(wifiMgr.getConnectionInfo().getIpAddress());
             mTv.setText("Trying with " + ip);
             try {
-                addr = InetAddress.getByName(ip);
+                mMyAddr = InetAddress.getByName(ip);
             } catch (UnknownHostException e) {
                 mTv.setText(e.getMessage());
                 return;
             }
         }
 
-        mPeerManager = new PeerManager(mChannel, addr);
+        mPeerManager = new PeerManager(mChannel, mMyAddr);
+
     }
 
     @Override
@@ -83,10 +109,12 @@ public class MainActivity extends Activity {
         mPeerManager.cleanup();
     }
 
-    public void startNetworking() {
+    public void startNetworking(int myPort) {
+
+
         // Test code is what all it is
         try {
-            mPeer = new Peer(InetAddress.getByName("192.168.1.103"), 32001, "some-peer");
+            mPeer = new Peer(InetAddress.getByName("192.168.1.103"), 32002, "some-peer");
         } catch (UnknownHostException e) {
             mTv.setText("Unable to create peer: " + e.getMessage());
             return;
@@ -94,32 +122,18 @@ public class MainActivity extends Activity {
 
         mPeerManager.addPeer(mPeer);
 
-        mTv.setText(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM).toString());
+
+        /*
+        if (mServiceFinder == null) {
+            mServiceFinder = new NetworkServiceFinder(PEER_SERVICE_TYPE, PEER_SERVICE_NAME, this, mNetworkServiceHandler);
+            mServiceFinder.startDiscovery(myPort, mMyAddr);
+        }
+        */
+
 
     }
 
-    private void scanDirectory(List<String> file_list, File directory, SharedPreferences lastSync,
-                               SharedPreferences curSync) {
-
-        if (lastSync.getLong(directory.getAbsolutePath(), 0) == directory.lastModified()) {
-            // Directory not modified since last sync, nothing to do further
-            return;
-        }
-
-        File[] files = directory.listFiles();
-        int total = files.length;
-        for (int i = 0; i < total; i++) {
-            if (files[i].isFile()) {
-                file_list.add(files[i].getAbsolutePath());
-                Log.d(PeerManager.LOGGER, "Added file " + files[i].getAbsolutePath());
-            } else if (files[i].isDirectory()) {
-                scanDirectory(file_list, files[i], lastSync, curSync);
-            }
-        }
-
-    }
-
-    public void onButtonClick (View view) {
+    public void onButtonClick(View view) {
 
         List<String> dirs = new ArrayList<>();
         dirs.add(Environment.getExternalStoragePublicDirectory(
@@ -134,7 +148,7 @@ public class MainActivity extends Activity {
     /*
     * File transfer button
      */
-    public void onButtonClick2 (View view) {
+    public void onButtonClick2(View view) {
         Operation op = new Operation(mPeer, this);
         Log.d(PeerManager.LOGGER, "Sending File to peer");
 
@@ -150,11 +164,28 @@ public class MainActivity extends Activity {
 
     }
 
+
+
+    /*
+    * Get total pending files
+     */
+    public void onButtonClick4(View view) {
+        List<String> dirs = new ArrayList<>();
+        dirs.add(Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_DCIM).toString());
+
+        Operation op = new Operation(mPeer, this);
+        op.mOperationType = Operation.OPERATION_TYPE_FETCH_SYNC_STATUS;
+        op.mObj = dirs;
+        mPeerManager.startBackgroundOperation(op);
+
+    }
+
     /*
     * Cancel file transfer button
     * Applies only to the running background operation
      */
-    public void onButtonClick3 (View view) {
+    public void onButtonClick3(View view) {
         mPeerManager.cancelOperation();
     }
 

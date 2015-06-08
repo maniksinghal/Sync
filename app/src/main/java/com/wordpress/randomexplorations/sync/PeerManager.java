@@ -62,6 +62,7 @@ public class PeerManager {
     // operations to check the message-queue intermittently.
     public final static int MSG_WORKER_CONTINUE_BACKGROUND_OP = 5;
     public final static int MSG_WORKER_CANCEL_OPERATION = 6;  // Relevant for background op's only
+    public final static int MSG_WORKER_GET_DIRECTORY_SYNC_PENDING_STATUS = 7;
 
     // Peer state
     public final static int PEER_STATE_DISCOVERED = 1;
@@ -208,7 +209,7 @@ public class PeerManager {
     private ServiceConnection mServiceConn = new ServiceConnection() {
 
         public void onServiceConnected(ComponentName name, IBinder service) {
-            ServiceBinder sb = (ServiceBinder)service;
+            ServiceBinder sb = (ServiceBinder) service;
             mServiceHandler = sb.workhandler;
 
 
@@ -241,7 +242,7 @@ public class PeerManager {
          * on its Message Queue. We later retrieve the queue-handle
          * to post messages to it.
          */
-        mWorkerThread  = new HandlerThread("Worker");
+        mWorkerThread = new HandlerThread("Worker");
         mWorkerThread.start();
         looper = mWorkerThread.getLooper();
 
@@ -256,16 +257,16 @@ public class PeerManager {
                     case MSG_WORKER_INIT_STATUS:
                         if (msg.arg1 == PEER_MANAGER_ERR_SUCCESS) {
                             mInitDone = true;
-                            mChannel.setLocalNetworkParams((SocketAddress)msg.obj);
+                            mChannel.setLocalNetworkParams((SocketAddress) msg.obj);
                             Log.d(LOGGER, "Workhandler init success for context: " + msg.arg2);
                         } else {
-                            mChannel.reportInitFailure((String)msg.obj);
+                            mChannel.reportInitFailure((String) msg.obj);
                         }
                         break;
 
                     // Result of the operation enqueued to the worker thread.
                     case MSG_WORKER_OP_STATUS:
-                        mChannel.reportOperationResult(msg.arg1, (Operation)msg.obj);
+                        mChannel.reportOperationResult(msg.arg1, (Operation) msg.obj);
                         if (msg.arg2 == WORKER_TYPE_FOREGROUND) {
                             mPendingOperations--;
                         } else {
@@ -284,11 +285,11 @@ public class PeerManager {
                         break;
 
                     case MSG_WORKER_OP_PROGRESS:
-                        mChannel.reportOperationProgress(msg.arg1, (Operation)msg.obj);
+                        mChannel.reportOperationProgress(msg.arg1, (Operation) msg.obj);
                         break;
 
                     case MSG_WORKER_CANCEL_STATUS:
-                        mChannel.reportOperationCancelSTatus(msg.arg1, (String)msg.obj);
+                        mChannel.reportOperationCancelSTatus(msg.arg1, (String) msg.obj);
                         break;
 
                     default:
