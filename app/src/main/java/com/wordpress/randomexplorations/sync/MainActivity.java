@@ -10,6 +10,7 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
+import android.provider.Settings;
 import android.support.v7.app.ActionBarActivity;
 import android.os.Bundle;
 import android.text.format.Formatter;
@@ -85,7 +86,7 @@ public class MainActivity extends Activity {
         // Check Wifi state
         ConnectivityManager cManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
         if (!cManager.getNetworkInfo(ConnectivityManager.TYPE_WIFI).isConnected()) {
-            mTv.setText("Wifi not connected");
+            mTv.setText("Wifi not connected: " + cManager.getNetworkInfo(ConnectivityManager.TYPE_WIFI).getState().toString());
             return;
         } else {
             WifiManager wifiMgr = (WifiManager) getSystemService(WIFI_SERVICE);
@@ -99,14 +100,20 @@ public class MainActivity extends Activity {
             }
         }
 
-        mPeerManager = new PeerManager(mChannel, mMyAddr);
+        String android_id = Settings.Secure.getString(getContentResolver(),
+                Settings.Secure.ANDROID_ID);
+        mPeerManager = new PeerManager(mChannel, mMyAddr, android_id);
 
     }
 
     @Override
     protected void onStop() {
         super.onStop();
-        mPeerManager.cleanup();
+        if (mPeerManager != null) {
+            mPeerManager.cleanup();
+            mPeerManager = null;
+        }
+
     }
 
     public void startNetworking(int myPort) {
@@ -114,7 +121,7 @@ public class MainActivity extends Activity {
 
         // Test code is what all it is
         try {
-            mPeer = new Peer(InetAddress.getByName("192.168.1.103"), 32002, "some-peer");
+            mPeer = new Peer(InetAddress.getByName("192.168.1.165"), 32002, "some-peer");
         } catch (UnknownHostException e) {
             mTv.setText("Unable to create peer: " + e.getMessage());
             return;
@@ -133,11 +140,34 @@ public class MainActivity extends Activity {
 
     }
 
+    private void add_directory_to_list(List<String> dirs, String dir) {
+
+        File target = new File(dir);
+        if (target != null && target.isDirectory()) {
+            if (!dirs.contains(target.toString())) {
+                dirs.add(target.toString());
+                Log.d(PeerManager.LOGGER, "Added " + target.toString() + " to directories");
+            } else {
+                Log.d(PeerManager.LOGGER, "Skipping " + target.toString() + ". Already exists!!");
+            }
+        }
+    }
+
+    private List<String> gen_dcim_directories_list() {
+        List<String> dirs = new ArrayList<>();
+        add_directory_to_list(dirs,
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM).toString());
+        add_directory_to_list(dirs, System.getenv("SECONDARY_STORAGE") + "/DCIM");
+        add_directory_to_list(dirs, System.getenv("SECONDARY_STORAGE") + "/DCIM");
+        add_directory_to_list(dirs, System.getenv("EXTERNAL_SDCARD_STORAGE") + "/DCIM");
+
+        return dirs;
+
+    }
+
     public void onButtonClick(View view) {
 
-        List<String> dirs = new ArrayList<>();
-        dirs.add(Environment.getExternalStoragePublicDirectory(
-                Environment.DIRECTORY_DCIM).toString());
+        List<String> dirs = gen_dcim_directories_list();
 
         Operation op = new Operation(mPeer, this);
         op.mOperationType = Operation.OPERATION_TYPE_SYNC_DIRECTORIES;
@@ -170,9 +200,7 @@ public class MainActivity extends Activity {
     * Get total pending files
      */
     public void onButtonClick4(View view) {
-        List<String> dirs = new ArrayList<>();
-        dirs.add(Environment.getExternalStoragePublicDirectory(
-                Environment.DIRECTORY_DCIM).toString());
+        List<String> dirs = gen_dcim_directories_list();
 
         Operation op = new Operation(mPeer, this);
         op.mOperationType = Operation.OPERATION_TYPE_FETCH_SYNC_STATUS;
@@ -186,7 +214,10 @@ public class MainActivity extends Activity {
     * Applies only to the running background operation
      */
     public void onButtonClick3(View view) {
-        mPeerManager.cancelOperation();
+
+        if (mPeerManager != null) {
+            mPeerManager.cancelOperation();
+        }
     }
 
     public TextView getTextView() {

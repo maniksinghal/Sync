@@ -68,6 +68,9 @@ public class WorkHandler extends Handler {
     public NotificationManager mNotification = null;
     public NotificationCompat.Builder mNotifyBuilder = null;
 
+    // Differentiate this android device from others connecting to the peer
+    public String android_id = null;
+
 
     // Messages exchanged with the peer
     // Keep in sync with Peer's project
@@ -108,6 +111,7 @@ public class WorkHandler extends Handler {
         public long bytesTransferred;
         public Operation op;
         public FileInputStream fileStream;  // Descriptor to current file
+        public int percent_complete = 0;
 
         public FileTransferContext(Operation oper) {
             files = (List<String>) oper.mObj;
@@ -116,6 +120,7 @@ public class WorkHandler extends Handler {
             bytesTransferred = 0;
             op = oper;
             fileStream = null;
+            percent_complete = 0;
 
         }
     }
@@ -165,20 +170,30 @@ public class WorkHandler extends Handler {
     /*
     * Foreground's thread is inited with this constructor.
      */
-    public WorkHandler(Looper looper, Handler client, InetAddress addr, int context) {
+    public WorkHandler(Looper looper, Handler client, String android_id, InetAddress addr, int context) {
         super(looper);
-        workhandler_init(client, addr, context);
+        workhandler_init(client, android_id, addr, context);
     }
 
     /*
     * Common code for initialization of foreground/background threads
      */
-    public void workhandler_init(Handler client, InetAddress addr, int context) {
+    public void workhandler_init(Handler client, String andr_id, InetAddress addr, int context) {
 
         mClient = client;
         mCallerContext = context;
+        android_id = andr_id;
+
+        Log.d(PeerManager.LOGGER, "Got android id: " + andr_id);
 
         if (mInitDone) {
+            // Re-starting activity may be trying to re-init already running background thread.
+            // If a background operation is ongoing, update its progress to restarted Activity
+            if (fileContext != null) {
+                sendResponseToClient(PeerManager.MSG_WORKER_OP_PROGRESS,
+                        fileContext.percent_complete, mCallerContext,
+                        fileContext.op);
+            }
             return;
         }
 
@@ -302,17 +317,23 @@ public class WorkHandler extends Handler {
                 /*
                 * NETWORK_MSG_FILE_PUT_START
                 * 4 byte msg-id
-                * 4 byte payload
+                * 4 byte payload-len
                 * 8 byte file last modified time
+                * 4 byte file length
                 * <file-name>
+                * 4 byte android-id.length
+                * <android-id string>
                  */
-                int msg_len = fileContext.currentFile.length() + 8;
-                byte[] data = new byte[8 + msg_len];
+                int msg_len = 24 + fileContext.currentFile.length() + android_id.length();
+                byte[] data = new byte[msg_len];
                 ByteBuffer bb = ByteBuffer.wrap(data);
                 bb.putInt(NETWORK_MSG_FILE_PUT_START);
-                bb.putInt(msg_len);
+                bb.putInt(msg_len - 8);
                 bb.putLong(thisFile.lastModified());
+                bb.putInt(fileContext.currentFile.length());
                 bb.put(fileContext.currentFile.getBytes());
+                bb.putInt(android_id.length());
+                bb.put(android_id.getBytes());
 
                 nResponse = sendMessage(data, data.length, sockaddr, true);
                 if (nResponse.return_code != NetworkResponse.NETWORK_RESPONSE_SUCCESS) {
@@ -326,9 +347,13 @@ public class WorkHandler extends Handler {
                     // Peer does not want to download this file, may be it already exists
                     // Check next file
                     fileContext.currentFile = null;
+                    // Assume file transferred as total-bytes-to-transfer accounts for this file.
+                    fileContext.bytesTransferred += thisFile.length();
                 }
 
             }
+
+            /*
 
             if (fileContext.files.isEmpty() && fileContext.currentFile == null) {
                 // Transfer complete for all files
@@ -337,6 +362,7 @@ public class WorkHandler extends Handler {
                 cleanup_background_operation();   // Ready for next operation request
                 return;
             }
+            */
         }
 
         if (fileContext.currentFile != null) {
@@ -416,6 +442,10 @@ public class WorkHandler extends Handler {
                 }
 
                 continue_directory_sync();
+                if (fileContext == null) {
+                    // This was the last directory, cleanup has been done
+                    return;
+                }
 
             } else {
 
@@ -432,9 +462,19 @@ public class WorkHandler extends Handler {
         *  which it may show in a progress bar to the user.
          */
         // @todo: Send iterim operation progress status
-        //sendResponseToClient(PeerManager.MSG_WORKER_OP_PROGRESS,
-        //      (int)((fileContext.bytesTransferred * 100 )/fileContext.totalBytes), mCallerContext,
-        //    fileContext.op);
+        int percent = (int)((fileContext.bytesTransferred * 100) / fileContext.totalBytes);
+        if (percent != fileContext.percent_complete) {
+            sendResponseToClient(PeerManager.MSG_WORKER_OP_PROGRESS,
+                    (percent), mCallerContext,
+                    fileContext.op);
+            fileContext.percent_complete = percent;
+
+            mNotifyBuilder.setContentText(percent + "% complete.");
+            Notification nt = mNotifyBuilder.build();
+            nt.flags = Notification.FLAG_ONGOING_EVENT;
+            mNotification.notify(0, nt);
+        }
+
 
         /*
         * Post a message to self, so that we can also cleanup our message-queue and continue
@@ -455,8 +495,8 @@ public class WorkHandler extends Handler {
         mNotifyBuilder = new
                 NotificationCompat.Builder(op.mThisActivity);
         mNotifyBuilder.setSmallIcon(R.mipmap.sync);
-        mNotifyBuilder.setContentTitle("Copying files");
-        mNotifyBuilder.setContentText("Yes, its true, copying files");
+        mNotifyBuilder.setContentTitle("Transferring files");
+        mNotifyBuilder.setContentText("Ongoing...");
 
         Intent intent = new Intent(op.mThisActivity, MainActivity.class);
 
@@ -483,14 +523,18 @@ public class WorkHandler extends Handler {
         * 4 byte payload-length
         * 4 byte directory-len
         * <directory-len>
+        * 4 byte android-id.length
+        * <android-id>
         */
-        int total_len = 12 + directory.length();
+        int total_len = 12 + directory.length() + 4 + android_id.length();
         byte[] data = new byte[total_len];
         ByteBuffer bb = ByteBuffer.wrap(data);
         bb.putInt(NETWORK_MSG_DIRECTORY_TIME_GET);
         bb.putInt(total_len - 8);
         bb.putInt(directory.length());
         bb.put(directory.getBytes());
+        bb.putInt(android_id.length());
+        bb.put(android_id.getBytes());
         return sendMessage(data, total_len, sockaddr, true);
 
     }
@@ -589,6 +633,8 @@ public class WorkHandler extends Handler {
             long mod_time = bb.getLong(0);
 
             File cur_dir = new File(cur_dir_str);
+            Log.d(PeerManager.LOGGER, "Directory: " + cur_dir_str + ", mytime: " +
+                 cur_dir.lastModified() + ", server_time: " + mod_time);
             if (cur_dir.lastModified() <= mod_time) {
                 // No files to sync in this directory
                 continue;
@@ -598,9 +644,10 @@ public class WorkHandler extends Handler {
             File[] files = cur_dir.listFiles();
             int total_files = files.length;
             for (int i = 0; i < total_files; i++) {
-                if (files[i].isFile() && files[i].lastModified() >= mod_time) {
+                if (files[i].isFile() && files[i].lastModified() > mod_time) {
                     pendingFiles++;
-                    Log.d(PeerManager.LOGGER, "File " + files[i].getAbsolutePath() + " pending for sync.");
+                    Log.d(PeerManager.LOGGER, "File " + files[i].getAbsolutePath() + " pending for sync: " +
+                        files[i].lastModified() + "/" + mod_time);
                     pendingBytes += files[i].length();
                 }
             }
@@ -630,8 +677,10 @@ public class WorkHandler extends Handler {
                 * 4 byte directory-string length
                 * <directory-string>
                 * 8 byte modified time
+                * 4 byte android_id.length
+                * <android-id>
                  */
-        int total_length = 20 + directorySyncContext.currentDirectory.length();
+        int total_length = 24 + directorySyncContext.currentDirectory.length() + android_id.length();
         byte[] data = new byte[total_length];
         bb = ByteBuffer.wrap(data);
         bb.putInt(NETWORK_MSG_DIRECTORY_TIME_SET);
@@ -639,6 +688,8 @@ public class WorkHandler extends Handler {
         bb.putInt(directorySyncContext.currentDirectory.length());
         bb.put(directorySyncContext.currentDirectory.getBytes());
         bb.putLong(cur_dir.lastModified());
+        bb.putInt(android_id.length());
+        bb.put(android_id.getBytes());
         return sendMessage(data, total_length, sockaddr, true);
     }
 
@@ -932,7 +983,7 @@ public class WorkHandler extends Handler {
                     // We might have been using a stale socket. Retry once with fresh connection
                     reconnecting = true;
                     retry = true;
-                    Log.d(PeerManager.LOGGER, "Exception with existing connection, retrying with fresh socket");
+                    Log.d(PeerManager.LOGGER, "Exception with existing connection (" + e.getMessage() + "), retrying with fresh socket");
                 } else {
                     netResponse.return_code = NetworkResponse.NETWORK_RESPONSE_ERR_IO_EXCEPTION;
                     netResponse.e = e;
@@ -1022,8 +1073,11 @@ public class WorkHandler extends Handler {
                 mClient = (Handler) msg.obj;
                 mCallerContext = msg.arg2;
                 break;
+            case PeerManager.MSG_WORK_SERVICE_INIT_1_5:  // 1.5 for service handler
+                android_id = (String)msg.obj;
+                break;
             case PeerManager.MSG_WORK_SERVICE_INIT_2:  // service handler initialization-end
-                workhandler_init(mClient, (InetAddress) msg.obj, mCallerContext);
+                workhandler_init(mClient, android_id, (InetAddress) msg.obj, mCallerContext);
                 break;
             // Interim message sent by background thread to self, for polling/cleaning-up
             // messages in the queue.

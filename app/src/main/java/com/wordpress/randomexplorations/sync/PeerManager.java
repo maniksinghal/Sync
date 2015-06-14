@@ -45,6 +45,9 @@ public class PeerManager {
     // Handler provided to worker threads (worker => peer communication)
     private Handler mClientHandler;
 
+    // Differentiate this device from others connecting to the peer.
+    private String mAndroidID;
+
     // Messages between worker thread and peer manager
     // worker-thread => peer-manager
     public final static int MSG_WORKER_INIT_STATUS = 1;
@@ -58,11 +61,12 @@ public class PeerManager {
     public final static int MSG_WORKER_CLEANUP = 2;
     public final static int MSG_WORK_SERVICE_INIT_1 = 3;
     public final static int MSG_WORK_SERVICE_INIT_2 = 4;
+    public final static int MSG_WORK_SERVICE_INIT_1_5 = 5;
     // Special case of background thread posting messages to itself during lengthy
     // operations to check the message-queue intermittently.
-    public final static int MSG_WORKER_CONTINUE_BACKGROUND_OP = 5;
-    public final static int MSG_WORKER_CANCEL_OPERATION = 6;  // Relevant for background op's only
-    public final static int MSG_WORKER_GET_DIRECTORY_SYNC_PENDING_STATUS = 7;
+    public final static int MSG_WORKER_CONTINUE_BACKGROUND_OP = 6;
+    public final static int MSG_WORKER_CANCEL_OPERATION = 7;  // Relevant for background op's only
+    public final static int MSG_WORKER_GET_DIRECTORY_SYNC_PENDING_STATUS = 8;
 
     // Peer state
     public final static int PEER_STATE_DISCOVERED = 1;
@@ -220,6 +224,11 @@ public class PeerManager {
             mServiceHandler.sendMessage(msg);
 
             msg = mServiceHandler.obtainMessage();
+            msg.what = MSG_WORK_SERVICE_INIT_1_5;
+            msg.obj = mAndroidID;
+            mServiceHandler.sendMessage(msg);
+
+            msg = mServiceHandler.obtainMessage();
             msg.what = MSG_WORK_SERVICE_INIT_2;
             msg.obj = localAddr;
             mServiceHandler.sendMessage(msg);
@@ -231,12 +240,13 @@ public class PeerManager {
 
     };
 
-    public PeerManager(ClientChannel channel, InetAddress addr) {
+    public PeerManager(ClientChannel channel, InetAddress addr, String android_id) {
         Looper looper;
         mPeers = new ArrayList();
         mChannel = channel;
         mInitDone = false;
         localAddr = addr;
+        mAndroidID = android_id;
 
         /* Create the foreground worker thread. It will start and block
          * on its Message Queue. We later retrieve the queue-handle
@@ -300,7 +310,7 @@ public class PeerManager {
 
         };
 
-        mWorker = new WorkHandler(looper, client, addr, WORKER_TYPE_FOREGROUND);
+        mWorker = new WorkHandler(looper, client, android_id, addr, WORKER_TYPE_FOREGROUND);
         mClientHandler = client;
 
         // Create a bound service for background task requests
